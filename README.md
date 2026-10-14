@@ -14,7 +14,9 @@ In the Unified Autonomy Stack this repository lives at
 ```bash
 docker buildx bake ros2_air_sonar --load --allow=network.host
 make build-air_sonar
-sudo scripts/install_air_sonar_udev.sh
+sudo cp workspaces/ws_air_sonar/src/picaso-drone/99-picaso.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=tty --action=add
 make launch DOCKER_COMPOSE_FILE=docker-compose.air_sonar.yml
 ```
 
@@ -22,7 +24,10 @@ Only the sonar service is launched. The dedicated workspace build uses its own
 Compose project. For detailed Docker, USB and bringup instructions, see the stack's
 `docs/air_sonar.md`. Host udev rules are necessary; installing them inside a
 container does not create `/dev/picaso` on the host. The rule uses `dialout` and
-mode `0660`, rather than making the sensor world-writable. Several STM32 devices
+mode `0660`, rather than making the sensor world-writable. Like VectorNav, setup
+is simply copying a rule to the host and reloading udev; no installer script is
+needed. The sensor can be disconnected during setup; `/dev/picaso` appears when
+it is connected. Several STM32 devices
 share the same VID/PID: qualify the rule by serial number when needed.
 
 For a native ROS 2 installation, use `rosdep install --from-paths src --ignore-src -r -y`
