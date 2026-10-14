@@ -52,6 +52,7 @@ One folder per run:
     capture_0001.bin
     capture_0002.bin
     ...
+    timestamps.csv
 ```
 
 Each `.bin` is raw little endian `uint16`, about 327 KB for 20 events.
@@ -61,6 +62,32 @@ rather than an SD card.
 The low byte of each sample is `GPIOB[7:0]` at the TIM8_CH1 rising edge and
 the high byte is the same pins at the falling edge, which together carry the
 16 channel PDM stream. The docstring in `picaso_record.py` has the full detail.
+
+## Time sync
+
+`timestamps.csv` is what lets a capture be lined up with your lidar, camera or
+pose data. One row per capture, written and flushed as the capture lands:
+
+| column | meaning |
+|---|---|
+| `t_cmd_unix` | CLOCK_REALTIME as the record command leaves the host |
+| `t_done_unix` | CLOCK_REALTIME as the last byte arrives |
+| `t_cmd_mono`, `t_done_mono` | the same two instants on CLOCK_MONOTONIC |
+| `t_cmd_utc` | `t_cmd_unix` again in ISO 8601, for reading by eye |
+
+Join on the unix columns. They are the same clock a ROS 2 header stamp uses,
+so if this script runs on the same Jetson as the perception stack, the clock
+is already shared and nothing else is needed. Use the monotonic columns for
+durations, because they cannot jump if NTP steps the system clock.
+
+If the recorder ends up on a different machine than the perception stack,
+tell us, because then the two need NTP or chrony between them first.
+
+The emission itself happens shortly after `t_cmd_unix`. The firmware polls for
+commands in its main loop, so a few milliseconds there are not logged. That is
+the floor on host-side sync. If it turns out to be too coarse for the flights,
+the fix is a GPIO trigger pulse on emit, which is firmware work. We would
+rather find that out during the integration test than after the campaign.
 
 ## The serial protocol
 

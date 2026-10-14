@@ -29,7 +29,36 @@ Output
 ------
     <YYYY_MM_DD_HHMMSS>[_<tag>]/capture_0001.bin   PDM ring-buffer data
     <YYYY_MM_DD_HHMMSS>[_<tag>]/capture_0001.jpg   scene photo at trigger time
+    <YYYY_MM_DD_HHMMSS>[_<tag>]/timestamps.csv     one row per capture
     ...
+
+TIME SYNC
+---------
+`timestamps.csv` is what lets a capture be lined up with lidar, camera or pose
+data recorded by another process.  One row per capture:
+
+    t_cmd_unix    CLOCK_REALTIME as the A/P command leaves the host
+    t_done_unix   CLOCK_REALTIME as the last byte of the capture lands
+    t_cmd_mono    CLOCK_MONOTONIC, same instant as t_cmd_unix
+    t_done_mono   CLOCK_MONOTONIC, same instant as t_done_unix
+    t_cmd_utc     t_cmd_unix again, ISO 8601, for reading by eye
+
+Use the unix columns to join against other logs; they are the same clock a
+ROS 2 message header stamp uses.  Use the monotonic columns for durations,
+since they cannot jump when NTP steps the system clock.
+
+Run this on the same machine as the other sensors and the clock is shared, so
+no further setup is needed.  Across two machines, run NTP or chrony between
+them first, or the join is only as good as their offset.
+
+The acoustic emission happens somewhere between t_cmd_unix and t_done_unix,
+close to t_cmd_unix: the firmware polls for commands in its main loop, so
+there are a few unlogged milliseconds between the write and the real pulse.
+That residual is the floor on host-side sync.  The capture itself helps here,
+because the transmit crosstalk is visible in the data at a fixed offset from
+the start of the capture window and anchors the acoustic zero inside the file.
+Removing the residual entirely would need a GPIO trigger pulse on emit that
+the host can timestamp, which is firmware work.
 
 Each .bin file is raw little-endian uint16 samples from the ring buffer:
     low  byte of each uint16: GPIOB[7:0] at TIM8_CH1 rising  edge
@@ -209,12 +238,21 @@ def upload_waveform(ser: serial.Serial, samples: list[int]) -> None:
 
 # ── Acquisition ───────────────────────────────────────────────────────────────
 
-def acquire(ser: serial.Serial, mode: str, n_events: int) -> bytes:
+def acquire(ser: serial.Serial, mode: str, n_events: int
+            ) -> tuple[bytes, tuple[float, float], tuple[float, float]]:
     """
     Send one A/P command and read exactly n_events × CHUNK_BYTES bytes.
     Raises TimeoutError if the port goes silent before all bytes arrive.
+
+    Returns (raw, t_cmd, t_done).  Each timestamp is a (unix, monotonic) pair:
+    t_cmd is taken as the command leaves the host, t_done as the last byte
+    lands.  The acoustic event sits just after t_cmd — see TIME SYNC below.
     """
     total = n_events * CHUNK_BYTES
+
+    # Taken as late as possible before the write so the gap to the real
+    # emission is as small as we can make it from the host side.
+    t_cmd = (time.time(), time.monotonic())
     ser.write(f"{mode},{n_events},0\n".encode('ascii'))
 
     raw = b''
@@ -226,7 +264,8 @@ def acquire(ser: serial.Serial, mode: str, n_events: int) -> bytes:
                 f"  Check firmware is running and TIMEOUT_S covers capture + transfer."
             )
         raw += chunk
-    return raw
+    t_done = (time.time(), time.monotonic())
+    return raw, t_cmd, t_done
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -329,6 +368,16 @@ def main() -> None:
     print(f"Shots         : {args.shots}" if args.shots else "Ctrl+C to stop.")
     print()
 
+    ts_path   = folder / "timestamps.csv"
+    ts_file   = open(ts_path, "w", newline="")
+    ts_writer = csv.writer(ts_file)
+    ts_writer.writerow([
+        "capture", "file", "mode", "events", "bytes",
+        "t_cmd_unix", "t_done_unix", "t_cmd_mono", "t_done_mono", "t_cmd_utc",
+    ])
+    ts_file.flush()
+    print(f"Time log      : {ts_path.name}")
+
     capture_n = 0
     try:
         while args.shots is None or capture_n < args.shots:
@@ -341,11 +390,21 @@ def main() -> None:
             # cam.read() returns a buffered frame and is fast (<1 ms after warmup).
             frame = grab_frame(cam) if cam else None
 
-            t_start = time.monotonic()
-            raw     = acquire(ser, args.mode, args.events)
-            elapsed = time.monotonic() - t_start
+            raw, t_cmd, t_done = acquire(ser, args.mode, args.events)
+            elapsed = t_done[1] - t_cmd[1]
 
             bin_path.write_bytes(raw)
+
+            # Flush every row: a cut power or a crash must not cost the sync
+            # information for the captures already on disk.
+            ts_writer.writerow([
+                capture_n, bin_path.name, args.mode, args.events, len(raw),
+                f"{t_cmd[0]:.6f}", f"{t_done[0]:.6f}",
+                f"{t_cmd[1]:.6f}", f"{t_done[1]:.6f}",
+                datetime.datetime.fromtimestamp(
+                    t_cmd[0], datetime.timezone.utc).isoformat(),
+            ])
+            ts_file.flush()
 
             cam_tag = ""
             if frame is not None:
@@ -367,6 +426,7 @@ def main() -> None:
     except TimeoutError as exc:
         print(f"\nError: {exc}")
     finally:
+        ts_file.close()
         ser.close()
         if cam:
             cam.release()

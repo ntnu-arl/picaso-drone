@@ -159,15 +159,18 @@ rover, so Albert can leave when he is done.
 ## What we need from the drone side
 
 * Perception stack recording during every block, including the stationary ones.
-* Shared clock. The recorder writes UTC and monotonic time per capture, so if
-  it runs on the same Jetson as the perception stack we are already synced.
+* Shared clock. The recorder writes a `timestamps.csv` into every run folder,
+  with a unix and a monotonic timestamp per capture. If it runs on the same
+  Jetson as the perception stack we are already synced and nothing else is
+  needed. If it runs on a different machine, please tell us, because then the
+  two clocks need NTP or chrony between them.
 * Static transforms: sonar to lidar, sonar to camera, sonar to flight base.
 * Air temperature per session.
 
 ## Data
 
-Each run writes one folder of `capture_NNNN.bin` files, named after the
-timestamp and the tag. About 327 KB per capture and roughly 3 captures per
+Each run writes one folder of `capture_NNNN.bin` files plus a `timestamps.csv`,
+named after the timestamp and the tag. About 327 KB per capture and roughly 3 captures per
 second, so budget 3.5 GB per hour and write to NVMe rather than an SD card.
 
 Keep a short log per run: folder, mode, throttle, target distance, temperature,
