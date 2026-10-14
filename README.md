@@ -1,5 +1,102 @@
 # PiCASo Sonar, Drone Integration
 
+## ROS 2 driver
+
+The `feat/ros2-driver` branch adds two Humble packages while retaining the original
+recorder and offline tools:
+
+- `picaso_msgs`: the `Capture` interface.
+- `picaso_driver`: a serial acquisition worker and ROS node (`air_sonar`).
+
+In the Unified Autonomy Stack this repository lives at
+`workspaces/ws_air_sonar/src/picaso-drone`. From the **stack root**:
+
+```bash
+docker buildx bake ros2_air_sonar --load --allow=network.host
+make build-air_sonar
+sudo scripts/install_air_sonar_udev.sh
+make launch DOCKER_COMPOSE_FILE=docker-compose.air_sonar.yml
+```
+
+Only the sonar service is launched. The dedicated workspace build uses its own
+Compose project. For detailed Docker, USB and bringup instructions, see the stack's
+`docs/air_sonar.md`. Host udev rules are necessary; installing them inside a
+container does not create `/dev/picaso` on the host. The rule uses `dialout` and
+mode `0660`, rather than making the sensor world-writable. Several STM32 devices
+share the same VID/PID: qualify the rule by serial number when needed.
+
+For a native ROS 2 installation, use `rosdep install --from-paths src --ignore-src -r -y`
+and `colcon build --symlink-install` in the workspace. Then source `install/setup.bash`
+and run `ros2 run picaso_driver picaso_driver`. The bundled sweep is installed with
+the package; SciPy/matplotlib are not required by the driver.
+
+### Topics and timestamps
+
+`/air_sonar/capture` (`picaso_msgs/msg/Capture`) contains the complete measurement:
+mode, event count, successful capture counter, original byte count, samples per
+event, sample rate, physical microphone mapping, and the actual uploaded DAC
+waveform. `pdm_words` is a **lossless `uint16[]` representation** of the little-endian
+`.bin` data. These are packed PDM bits, not PCM amplitudes or estimated distances.
+Bits 0..7 belong to physical microphones 2,4,..16; bits 8..15 to 1,3,..15.
+
+All recorder clocks are retained as integer nanoseconds:
+
+| Message field | Original CSV field | Clock |
+| --- | --- | --- |
+| `t_cmd_unix_ns` | `t_cmd_unix` | Host realtime before command write |
+| `t_done_unix_ns` | `t_done_unix` | Host realtime after final response byte |
+| `t_cmd_mono_ns` | `t_cmd_mono` | Host monotonic before command write |
+| `t_done_mono_ns` | `t_done_mono` | Host monotonic after final response byte |
+| `t_cmd_utc` | `t_cmd_utc` | ISO UTC text for command time |
+
+Divide an integer clock field by `1e9` to recover seconds. `header.stamp` equals
+`t_cmd_unix_ns` exactly, and `header.frame_id` is configured by `frame_id`. Physical
+sensor stamps always use host realtime, independent of a simulation `/clock`.
+There is **no device/acoustic emission timestamp** in the firmware protocol.
+The successful capture ID can be used to export `capture_0001.bin` names; the live
+driver does not create raw files automatically. A ROS bag records data and metadata
+together. To reconstruct `.bin` bytes, encode `pdm_words` as **little-endian uint16**.
+
+`/air_sonar/status` publishes standard diagnostics with connection state, counters
+and errors. Missing hardware and truncated captures trigger bounded reconnects;
+partial measurements are never published. Each new active connection uploads all
+1024 DAC samples, padding the selected sweep with silence (2048). Because responses
+have no header, sequence, checksum or acknowledgment, reconnect first drains until
+the stream is quiet. Persistent misalignment may still require a sensor reset;
+the protocol cannot prove synchronization or detect same-length corruption.
+
+The optional **host webcam** publishes JPEG `sensor_msgs/msg/CompressedImage` on
+`/air_sonar/image/compressed`. `has_image` and `image_stamp` in the capture associate
+it with the pre-command image. Its stamp is host frame receipt, not a calibrated
+exposure time. Camera acquisition is disabled by default (`camera_index: -1`).
+The driver publishes no mounting TF; supply a measured extrinsic separately.
+
+Acquisition parameters are read-only after startup. Change
+`robot_bringup/config/ros2/air_sonar.yaml` and restart the service. Set `port: ""`
+for VID/PID discovery, optionally filtered by `serial_number`. An explicit port
+takes priority over discovery. `capture_period: 0.0` acquires back-to-back; positive
+values specify the minimum period including transfer time.
+
+### Tests without hardware
+
+After building, run the real serial pseudo-terminal and ROS 2 launch tests in
+the driver image (from the stack root):
+
+```bash
+docker run --rm --network host -e ROS_DOMAIN_ID=224 \
+  -v "$PWD/workspaces/ws_air_sonar:/workspace" \
+  -v "$PWD/workspaces/robot_bringup:/workspace/src/robot_bringup:ro" \
+  -w /workspace unified_autonomy:ros2_air_sonar \
+  python3 -m pytest src/picaso-drone/picaso_driver/test -q -s
+```
+
+These tests launch only the sonar node. They verify active/passive modes, the
+1024-sample upload, byte-exact PDM round trips, all clock fields, partial-response
+rejection, reconnect/reupload, and ROS topic delivery. Physical USB behavior,
+acoustic emission and webcam hardware still require sensor-connected tests.
+
+---
+
 In-air sonar sensor: 16 MEMS microphones and one ultrasonic emitter.
 It is a plain USB-C serial device, so there is no SDK and no driver to install.
 `picaso_record.py` sends short ASCII commands and stores the raw bytes it

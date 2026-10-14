@@ -1,4 +1,6 @@
 # Install to /etc/udev/rules.d/ so the sensor appears at a stable /dev/picaso
 #   sudo cp 99-picaso.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules && sudo udevadm trigger
-SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", SYMLINK+="picaso", MODE="0666"
+# These IDs are shared by STM32 CDC devices. For multiple matching boards, add
+# ATTRS{serial}=="<sensor USB serial>" to select the sonar explicitly.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", SYMLINK+="picaso", GROUP="dialout", MODE="0660", ENV{ID_MM_DEVICE_IGNORE}="1"
