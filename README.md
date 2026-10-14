@@ -118,6 +118,61 @@ published, the serial device is closed and diagnostics report `completed`; the
 node stays alive for inspection. Partial captures do not count towards the limit.
 All these parameters are read-only until the node is restarted.
 
+### Export a ROS 1 mission folder to the original recorder format
+
+Put all completed split `.bag` files from one mission in a folder, for example:
+
+```text
+mission_2026-10-06/
+    quail_2026-10-06-14-13-23_0.bag
+    quail_2026-10-06-14-14-10_1.bag
+    ...
+```
+
+From this driver repository, install the optional offline reader with Python
+3.10 or newer, then pass the mission folder:
+
+```bash
+python3 -m pip install -r requirements-bag-export.txt
+python3 picaso_export_bag.py /path/to/mission_2026-10-06
+```
+
+The script reads all `.bag` files directly in that folder and combines the
+recorded `/air_sonar/capture` messages into one sibling output folder:
+
+```text
+mission_2026-10-06_export/
+    capture_0001.bin
+    capture_0002.bin
+    ...
+    timestamps.csv
+```
+
+Captures are merged in bag recording timestamp order, regardless of split file
+names. Numbering continues across files and driver restarts; the original
+`capture_id` remains in the CSV. The binary and CSV formats are the same as the
+ROS 2 export described below and can be consumed by `sensorcheck.py`,
+`miccheck.py` and `beamform_frtis.py`.
+
+To choose another output directory or capture topic:
+
+```bash
+python3 picaso_export_bag.py /path/to/mission_2026-10-06 \
+    --output /path/to/exports/mission_2026-10-06 --topic /air_sonar/capture
+```
+
+A single `.bag` file is also accepted. The output directory must not already
+exist. Subdirectories are not scanned, and `.bag.active` files cause an error
+so an unfinished mission is not silently exported. Bags without the selected
+topic are skipped; the mission must contain at least one capture. A bag must
+actually contain the bridged `picaso_msgs/Capture` topic to recover raw sonar
+data; adding the exporter cannot recover captures that were never recorded.
+
+This uses the message definitions embedded in ROS 1 bags; no ROS installation,
+built message package, sensor, or replay is needed. JPEGs and waveform tables
+are not extracted. The optional dependency stays separate from acquisition
+requirements so it need only be installed on the machine doing the export.
+
 ### Export a ROS 2 bag to the original recorder format
 
 With ROS 2 and the built sonar workspace sourced, run the script from this
@@ -129,8 +184,9 @@ python3 picaso_export_bag.py /path/to/sonar_bag \
     --topic /air_sonar/capture --output /path/to/sonar_export
 ```
 
-`bag` must be a ROS 2 bag **directory containing `metadata.yaml`**. `--topic`
-must name a recorded `picaso_msgs/msg/Capture` topic. `--output` is optional;
+For ROS 2, `bag` must be a **directory containing `metadata.yaml`**. `--topic`
+defaults to `/air_sonar/capture` and must name a recorded
+`picaso_msgs/msg/Capture` topic. `--output` is optional;
 it defaults to `<bag_name>_export` beside the bag. The output folder must not
 already exist. The script works across split bag files. SQLite bags work in
 the driver image; other storage formats require their ROS 2 storage plugin.

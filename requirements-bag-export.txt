@@ -1,0 +1,2 @@
+# Optional offline ROS 1 mission exporter (Python >=3.10; no ROS installation).
+rosbags>=0.11,<0.12
