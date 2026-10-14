@@ -1,0 +1,12 @@
+# Captures: regenerable, large. Never commit.
+20[0-9][0-9]_*/
+*.bin
+*.mat
+*.avi
+*.npz
+*.png
+*.jpg
+
+venv/
+__pycache__/
+.DS_Store

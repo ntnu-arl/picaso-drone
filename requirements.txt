@@ -1,0 +1,7 @@
+# Acquisition only (this is all the Jetson needs)
+pyserial>=3.5
+numpy>=1.24
+
+# Offline evaluation (sensorcheck.py, miccheck.py, beamform_frtis.py)
+scipy>=1.10
+matplotlib>=3.7

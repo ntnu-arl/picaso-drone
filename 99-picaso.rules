@@ -1,0 +1,4 @@
+# Install to /etc/udev/rules.d/ so the sensor appears at a stable /dev/picaso
+#   sudo cp 99-picaso.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", SYMLINK+="picaso", MODE="0666"
