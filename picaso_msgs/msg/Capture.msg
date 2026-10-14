@@ -32,3 +32,6 @@ uint16[] transmit_waveform
 # Image stamp is host receive time before the sonar command, not hardware exposure time.
 bool has_image
 builtin_interfaces/Time image_stamp
+
+# Measurement label only; does not change acquisition or create files/directories.
+string tag

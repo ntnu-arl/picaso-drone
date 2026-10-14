@@ -15,6 +15,8 @@ from serial.tools import list_ports
 SAMPLES_PER_EVENT = 8192
 WAVEFORM_SAMPLES = 1024
 SAMPLE_RATE_HZ = 4.44444e6
+# Same nominal 343 m/s round-trip conversion as picaso_record.py.
+RANGE_PER_EVENT = SAMPLES_PER_EVENT / SAMPLE_RATE_HZ * 343.0 / 2
 BIT_TO_MICROPHONE = tuple(range(2, 17, 2)) + tuple(range(1, 16, 2))
 
 
@@ -27,6 +29,9 @@ class DriverConfig:
     baud_rate: int = 115200
     mode: str = 'A'
     events: int = 20
+    max_range: float = 0.0
+    shots: int = 0
+    tag: str = ''
     waveform_file: str = ''
     frame_id: str = 'air_sonar_link'
     capture_period: float = 0.0
@@ -47,12 +52,24 @@ class DriverConfig:
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f'{name} must be finite and positive')
-        for name in ('capture_period', 'upload_settle_time'):
+        for name in ('capture_period', 'upload_settle_time', 'max_range'):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f'{name} must be finite and nonnegative')
         if not self.frame_id or self.camera_index < -1 or not 1 <= self.camera_jpeg_quality <= 100:
             raise ValueError('frame_id, camera_index or camera_jpeg_quality is invalid')
+        if self.shots < 0:
+            raise ValueError('shots must be nonnegative; zero means continuous acquisition')
+
+    @property
+    def capture_events(self) -> int:
+        """Resolve the range override to the firmware's bounded event count.
+
+        :return: Configured events, or ceil(max_range / range_per_event), capped at 32.
+        """
+        if not self.max_range:
+            return self.events
+        return max(1, math.ceil(min(self.max_range / RANGE_PER_EVENT, 32)))
 
 
 @dataclass(frozen=True)
@@ -133,9 +150,9 @@ class PicasoSerial:
 
         :return: A complete acquisition; partial captures raise and are never published.
         """
-        total = self.config.events * SAMPLES_PER_EVENT * 2
+        total = self.config.capture_events * SAMPLES_PER_EVENT * 2
         command_unix, command_mono = time.time_ns(), time.monotonic_ns()
-        self._write(f'{self.config.mode},{self.config.events},0\n'.encode('ascii'))
+        self._write(f'{self.config.mode},{self.config.capture_events},0\n'.encode('ascii'))
         deadline = command_mono / 1e9 + self.config.capture_timeout
         data = bytearray()
         while len(data) < total:

@@ -82,6 +82,42 @@ for VID/PID discovery, optionally filtered by `serial_number`. An explicit port
 takes priority over discovery. `capture_period: 0.0` acquires back-to-back; positive
 values specify the minimum period including transfer time.
 
+### Measurement-plan settings
+
+The ROS configuration lives in
+`robot_bringup/config/ros2/air_sonar.yaml` in the stack. The recorder's options map
+to ROS parameters as follows:
+
+| Recorder option | ROS parameter | Meaning |
+| --- | --- | --- |
+| `--events 20` | `events: 20` | Explicit receive-event count when max_range is zero. |
+| `--max-range 5` | `max_range: 5.0` | Override events with a nominal 5 m capture window (16 events). |
+| `--waveform FILE` | `waveform_file: FILE` | Active-mode DAC CSV; ignored in passive mode. |
+| `--tag health_pre` | `tag: health_pre` | Measurement label in every Capture and exported CSV row. |
+| `--shots 20` | `shots: 20` | Stop acquisition after 20 successful captures; zero runs continuously. |
+
+`max_range: 0.0` keeps `events`. Positive ranges use the same conversion as the
+recorder: `ceil(max_range / (8192 / 4444440 * 343 / 2))`, capped at 32 events
+(approximately 10.12 m). This controls how long samples are recorded, not a
+measured distance or guaranteed detection range. Values above the firmware limit
+are capped with a warning. The actual event count is published in Capture and
+the resolved capture window is reported in diagnostics.
+
+`waveform_file` accepts an absolute container path, an existing path relative to
+the node's working directory, or a path relative to the installed driver share,
+such as `sweeps/sweep_512_taper30.csv`. Empty selects that same bundled sweep.
+Custom CSVs must be visible inside the container and contain 1..1024 integer DAC
+samples in 0..4095; shorter tables are padded with 2048. The bringup YAML includes
+examples of bundled and custom paths.
+
+In the original recorder, `tag` only labels the output folder. The ROS driver
+creates no recording folder, so the tag is stored as metadata instead; choose a
+bag directory separately with `ros2 bag record -o ...`. Changing the tag does not
+change topic names or sensor behavior. Once `shots` successful captures have been
+published, the serial device is closed and diagnostics report `completed`; the
+node stays alive for inspection. Partial captures do not count towards the limit.
+All these parameters are read-only until the node is restarted.
+
 ### Export a ROS 2 bag to the original recorder format
 
 With ROS 2 and the built sonar workspace sourced, run the script from this
@@ -120,8 +156,8 @@ The CSV's first ten columns match the original recorder: `capture`, `file`,
 float rounding. UTC text is copied unchanged.
 
 Extra columns preserve the original `capture_id`, `header_stamp_ns`, `frame_id`,
-`bag_stamp_ns` (the bag recording timestamp), and `image_stamp_ns` (blank when
-no image was paired). File numbering and the `capture` column are sequential
+`bag_stamp_ns` (the bag recording timestamp), `image_stamp_ns` (blank when
+no image was paired), and `tag`. File numbering and the `capture` column are sequential
 in bag order, so IDs resetting after a driver restart cannot overwrite files.
 This exporter does not extract JPEGs or waveform tables. If corrupt data or an
 I/O error interrupts export, the partial output folder is retained for inspection;

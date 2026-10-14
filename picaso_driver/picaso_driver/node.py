@@ -19,7 +19,7 @@ from sensor_msgs.msg import CompressedImage
 from picaso_msgs.msg import Capture
 from picaso_driver.protocol import (
     Acquisition, BIT_TO_MICROPHONE, DriverConfig, PicasoSerial,
-    SAMPLE_RATE_HZ, SAMPLES_PER_EVENT, load_waveform,
+    RANGE_PER_EVENT, SAMPLE_RATE_HZ, SAMPLES_PER_EVENT, load_waveform,
 )
 
 
@@ -47,7 +47,8 @@ def capture_message(data: Acquisition, config: DriverConfig, capture_id: int, wa
     message.header.frame_id = config.frame_id
     message.capture_id = capture_id
     message.mode = config.mode
-    message.events = config.events
+    message.events = config.capture_events
+    message.tag = config.tag
     message.byte_count = len(data.words) * 2
     for name in ('t_cmd_unix_ns', 't_done_unix_ns', 't_cmd_mono_ns', 't_done_mono_ns'):
         setattr(message, name, getattr(data, name))
@@ -134,23 +135,34 @@ class AirSonarDriver(Node):
             field.name, getattr(defaults, field.name), ParameterDescriptor(read_only=True)).value
             for field in fields(defaults)}
         self.config = DriverConfig(**parameters)
-        waveform = self.config.waveform_file or str(
-            Path(get_package_share_directory('picaso_driver')) / 'sweeps/sweep_512_taper30.csv')
-        self.waveform = load_waveform(Path(waveform)) if self.config.mode == 'A' else array('H')
+        waveform = Path(self.config.waveform_file or 'sweeps/sweep_512_taper30.csv').expanduser()
+        if not waveform.is_absolute() and not waveform.is_file():
+            waveform = Path(get_package_share_directory('picaso_driver')) / waveform
+        self.waveform = load_waveform(waveform) if self.config.mode == 'A' else array('H')
         self.capture_pub = self.create_publisher(Capture, '~/capture', 2)
         self.image_pub = self.create_publisher(CompressedImage, '~/image/compressed', 2)
         self.status_pub = self.create_publisher(DiagnosticArray, '~/status', 2)
         self.shutdown_event = threading.Event()
         self.sensor = PicasoSerial(self.config, self.waveform, self.shutdown_event)
         self.lock = threading.Lock()
-        self.status = {'state': 'connecting', 'captures': 0, 'errors': 0, 'message': 'Waiting for USB device'}
+        self.status = {'state': 'connecting', 'captures': 0, 'errors': 0, 'message': 'Waiting for USB device',
+                       'tag': self.config.tag, 'events': self.config.capture_events,
+                       'max_range': self.config.max_range,
+                       'capture_range_m': self.config.capture_events * RANGE_PER_EVENT,
+                       'shots': self.config.shots,
+                       'waveform_file': str(waveform) if self.waveform else ''}
         self.camera = (CameraWorker(self.config, self.shutdown_event)
                        if self.config.camera_index >= 0 else None)
         self.create_timer(1.0, self.publish_status)
         self.worker = threading.Thread(target=self.acquire_loop, name='picaso-acquisition', daemon=True)
         self.worker.start()
         self.get_logger().info(
-            f'PiCASo {self.config.mode}, {self.config.events} events; publishing packed uint16 PDM on ~/capture')
+            f'PiCASo {self.config.mode}, {self.config.capture_events} events '
+            f'(~{self.config.capture_events * RANGE_PER_EVENT:.2f} m capture window), '
+            f'shots={self.config.shots or "continuous"}, tag={self.config.tag!r}; '
+            'publishing packed uint16 PDM on ~/capture')
+        if self.config.max_range > 32 * RANGE_PER_EVENT:
+            self.get_logger().warning('max_range exceeds the firmware limit; capture window capped at 32 events')
 
     def grab_image(self) -> CompressedImage | None:
         """Associate a recent optional webcam frame with the next sonar command.
@@ -190,6 +202,12 @@ class AirSonarDriver(Node):
                         self.status.update(state='streaming', captures=capture_id, message='Receiving complete captures',
                                            last_capture_duration_sec=(data.t_done_mono_ns - data.t_cmd_mono_ns) / 1e9,
                                            last_capture_id=capture_id, port=self.sensor.connection.port)
+                        if self.config.shots and capture_id >= self.config.shots:
+                            self.status.update(state='completed', message='Requested capture count reached')
+                    if self.config.shots and capture_id >= self.config.shots:
+                        self.get_logger().info(f'Completed {capture_id} captures; acquisition stopped')
+                        self.shutdown_event.set()
+                        return
                     self.shutdown_event.wait(max(0.0, self.config.capture_period - (time.monotonic() - began)))
             except Exception as error:
                 if self.shutdown_event.is_set() or not self.context.ok():
@@ -208,7 +226,7 @@ class AirSonarDriver(Node):
         diagnostic = DiagnosticStatus()
         diagnostic.name = f'{self.get_name()}/serial'
         diagnostic.hardware_id = values.get('port', self.config.port or '0483:5740')
-        diagnostic.level = DiagnosticStatus.OK if values['state'] == 'streaming' else DiagnosticStatus.WARN
+        diagnostic.level = DiagnosticStatus.OK if values['state'] in ('streaming', 'completed') else DiagnosticStatus.WARN
         diagnostic.message = str(values['message'])
         diagnostic.values = [KeyValue(key=key, value=str(value)) for key, value in values.items()]
         report = DiagnosticArray()

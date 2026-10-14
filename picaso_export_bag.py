@@ -11,7 +11,7 @@ import sys
 CSV_FIELDS = (
     'capture', 'file', 'mode', 'events', 'bytes',
     't_cmd_unix', 't_done_unix', 't_cmd_mono', 't_done_mono', 't_cmd_utc',
-    'capture_id', 'header_stamp_ns', 'frame_id', 'bag_stamp_ns', 'image_stamp_ns',
+    'capture_id', 'header_stamp_ns', 'frame_id', 'bag_stamp_ns', 'image_stamp_ns', 'tag',
 )
 
 
@@ -84,7 +84,7 @@ def export_bag(bag: Path, topic: str, output: Path) -> int:
                              seconds_text(message.t_cmd_unix_ns), seconds_text(message.t_done_unix_ns),
                              seconds_text(message.t_cmd_mono_ns), seconds_text(message.t_done_mono_ns),
                              message.t_cmd_utc, message.capture_id, header_ns, message.header.frame_id,
-                             bag_stamp, image_ns))
+                             bag_stamp, image_ns, message.tag))
             stream.flush()
             count = index
     return count
