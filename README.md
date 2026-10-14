@@ -27,20 +27,21 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ## Record
 
-```bash
-# active: emit the sweep, then listen
-venv/bin/python picaso_record.py --mode A --max-range 5 --camera -1 \
-    --port /dev/picaso --waveform sweeps/sweep_512_taper30.csv --tag test
+Quick smoke test, 5 captures, to confirm the sensor answers:
 
-# passive: listen only, no emission
-venv/bin/python picaso_record.py --mode P --events 20 --camera -1 \
-    --port /dev/picaso --shots 20 --tag noise
+```bash
+venv/bin/python picaso_record.py --mode A --events 20 --camera -1 \
+    --port /dev/picaso --waveform sweeps/sweep_512_taper30.csv \
+    --shots 5 --tag smoketest
 ```
 
-Ctrl+C stops a run, or use `--shots N` for a fixed count.
-
 `--camera -1` disables the webcam capture, which the drone does not need.
-OpenCV is then never imported.
+OpenCV is then never imported. Ctrl+C stops a run, or use `--shots N` for a
+fixed count.
+
+**For the campaign itself, use `MEASUREMENT_PLAN.md`.** It has a ready to copy
+and paste command for every test scenario, so nothing has to be assembled by
+hand on the day.
 
 ## What it writes
 
