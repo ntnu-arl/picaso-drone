@@ -90,6 +90,9 @@ to ROS parameters as follows:
 
 | Recorder option | ROS parameter | Meaning |
 | --- | --- | --- |
+| `--mode A` / `--mode P` | `mode: A` / `mode: P` | Active waveform upload and capture, or passive capture only. |
+| `--port /dev/picaso` | `port: /dev/picaso` | Explicit serial device; empty enables VID/PID discovery. |
+| `--camera 0` / `--camera -1` | `camera_index: 0` / `camera_index: -1` | Optional paired webcam, or disabled. |
 | `--events 20` | `events: 20` | Explicit receive-event count when max_range is zero. |
 | `--max-range 5` | `max_range: 5.0` | Override events with a nominal 5 m capture window (16 events). |
 | `--waveform FILE` | `waveform_file: FILE` | Active-mode DAC CSV; ignored in passive mode. |
@@ -106,9 +109,42 @@ the resolved capture window is reported in diagnostics.
 `waveform_file` accepts an absolute container path, an existing path relative to
 the node's working directory, or a path relative to the installed driver share,
 such as `sweeps/sweep_512_taper30.csv`. Empty selects that same bundled sweep.
-Custom CSVs must be visible inside the container and contain 1..1024 integer DAC
-samples in 0..4095; shorter tables are padded with 2048. The bringup YAML includes
+Custom CSVs must be visible inside the container and contain integer DAC samples
+in 0..4095. As in the original recorder, the first 1024 samples are used; longer
+tables log a truncation warning and shorter tables are padded with 2048. Empty
+CSVs and invalid sample values are rejected. The bringup YAML includes
 examples of bundled and custom paths.
+
+The range conversion is implemented in `DriverConfig.capture_events` in
+`picaso_driver/picaso_driver/protocol.py`, and is used for the serial command,
+expected byte count and published capture metadata. Startup logs show the
+requested positive `max_range`, resolved event count and actual capture depth.
+Unlike the recorder's optional `--max-range`, the ROS parameter uses `0.0` as
+its disabled value; a positive range always rounds up to at least one event.
+
+Parameters are checked before acquisition starts: integer protocol and camera
+settings, `mode` A/P, events 1..32, nonnegative shot count and camera warmup,
+positive baud rate, JPEG quality 1..100, and nonempty active frame identifiers.
+Timing values must be finite, have the documented sign, and fit supported wait
+limits. `serial_timeout` must not exceed `capture_timeout`. Read polling can be
+short (default 1 s); a quiet read is retried until the total capture deadline
+(default 10 s, matching the original recorder for supported event counts).
+Partial data at that deadline is discarded before reconnecting.
+
+The optional camera discards `camera_warmup_frames` after each open (default
+10, matching the recorder). Backend selection follows the platform: DirectShow
+on Windows, AVFoundation on macOS, and OpenCV's automatic backend on Linux.
+Camera open, read and encoding failures are logged and retried independently
+of sonar acquisition. Serial discovery errors list available ports and their
+USB identities. Capture byte counts, duration and throughput appear in
+diagnostics; per-capture details are logged at DEBUG level. Use
+`log_level:=debug` with the stack's `air_sonar.launch.py` to see them.
+
+All recorder measurement options have ROS parameter equivalents. Interactive
+tag/camera prompts are supplied through parameters in a ROS launch. The live
+driver publishes capture metadata and paired JPEGs for bag recording; raw
+binary and CSV files are reconstructed offline with `picaso_export_bag.py`.
+Parameter help is also exposed through `ros2 param describe /air_sonar <name>`.
 
 In the original recorder, `tag` only labels the output folder. The ROS driver
 creates no recording folder, so the tag is stored as metadata instead; choose a

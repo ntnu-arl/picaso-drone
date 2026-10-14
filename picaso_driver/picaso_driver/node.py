@@ -4,6 +4,7 @@ from array import array
 from dataclasses import fields
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
 import threading
 import time
 
@@ -21,6 +22,29 @@ from picaso_driver.protocol import (
     Acquisition, BIT_TO_MICROPHONE, DriverConfig, PicasoSerial,
     RANGE_PER_EVENT, SAMPLE_RATE_HZ, SAMPLES_PER_EVENT, load_waveform,
 )
+
+PARAMETER_DESCRIPTIONS = {
+    'port': 'Serial device path; empty enables USB VID/PID discovery.',
+    'serial_number': 'Optional USB serial identifier used during automatic discovery.',
+    'baud_rate': 'Positive serial baud rate (USB CDC normally uses 115200).',
+    'mode': 'A: emit the DAC waveform and capture; P: passive capture only.',
+    'events': 'Receive events in 1..32, used when max_range is zero.',
+    'max_range': 'Nominal capture window in metres; positive overrides events, zero uses events.',
+    'shots': 'Successful captures before stopping acquisition; zero runs continuously.',
+    'tag': 'Measurement label saved in Capture messages; surrounding whitespace is trimmed.',
+    'waveform_file': 'Active-mode DAC CSV; empty selects the bundled sweep, ignored in passive mode.',
+    'frame_id': 'Nonempty frame identifier for capture messages.',
+    'capture_period': 'Minimum period between commands, including acquisition time; zero is continuous.',
+    'serial_timeout': 'Positive serial read polling interval; cannot exceed capture_timeout.',
+    'capture_timeout': 'Positive total deadline for receiving a complete capture.',
+    'reconnect_period': 'Positive delay before retrying a failed serial or camera connection.',
+    'upload_settle_time': 'Nonnegative wait after waveform upload for firmware command processing.',
+    'camera_index': 'Webcam device index; -1 disables the camera.',
+    'camera_warmup_frames': 'Frames discarded after each camera open for exposure settling; default 10.',
+    'camera_frame_id': 'Nonempty image frame identifier when the camera is enabled.',
+    'camera_jpeg_quality': 'JPEG quality in 1..100.',
+    'camera_max_age': 'Positive maximum age in seconds of the pre-command image paired with a capture.',
+}
 
 
 def timestamp(nanoseconds: int) -> Time:
@@ -68,13 +92,15 @@ def capture_message(data: Acquisition, config: DriverConfig, capture_id: int, wa
 class CameraWorker:
     """Keep a bounded latest webcam image without blocking sonar serial I/O."""
 
-    def __init__(self, config: DriverConfig, stop: threading.Event) -> None:
+    def __init__(self, config: DriverConfig, stop: threading.Event, logger) -> None:
         """Start optional camera acquisition in an independent daemon worker.
 
         :param config: Webcam device, encoding and freshness settings.
         :param stop: Shared node shutdown event.
+        :param logger: Node logger for optional-camera failures and connection details.
         """
         self.config, self.stop = config, stop
+        self.logger = logger
         self.lock = threading.Lock()
         self.image = None
         self.received = 0.0
@@ -83,20 +109,41 @@ class CameraWorker:
 
     def capture_loop(self) -> None:
         """Encode latest frames; webcam failures do not reconnect the sonar."""
-        import cv2
+        try:
+            import cv2
+        except ImportError as error:
+            self.logger.warning(f'Optional webcam disabled: OpenCV is unavailable ({error})')
+            return
+        backend = (cv2.CAP_DSHOW if sys.platform == 'win32' else
+                   cv2.CAP_AVFOUNDATION if sys.platform == 'darwin' else cv2.CAP_ANY)
         while not self.stop.is_set():
             camera = None
             try:
-                camera = cv2.VideoCapture(self.config.camera_index, cv2.CAP_V4L2)
+                camera = cv2.VideoCapture(self.config.camera_index, backend)
+                if not camera.isOpened():
+                    raise OSError(f'Cannot open camera {self.config.camera_index}')
+                for _ in range(self.config.camera_warmup_frames):
+                    if self.stop.is_set():
+                        break
+                    success, _ = camera.read()
+                    if not success:
+                        raise OSError('Camera stopped delivering frames during warmup')
+                if self.stop.is_set():
+                    break
+                self.logger.info(
+                    f'Camera {self.config.camera_index}: '
+                    f'{int(camera.get(cv2.CAP_PROP_FRAME_WIDTH))}x'
+                    f'{int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))}, '
+                    f'{camera.get(cv2.CAP_PROP_FPS):.1f} fps; warmup complete')
                 while not self.stop.is_set() and camera.isOpened():
                     success, frame = camera.read()
                     received, received_mono = time.time_ns(), time.monotonic()
                     if not success:
-                        break
+                        raise OSError('Camera stopped delivering frames')
                     success, jpeg = cv2.imencode('.jpg', frame,
                                                 [cv2.IMWRITE_JPEG_QUALITY, self.config.camera_jpeg_quality])
                     if not success:
-                        continue
+                        raise OSError('Camera JPEG encoding failed')
                     message = CompressedImage()
                     message.header.stamp = timestamp(received)
                     message.header.frame_id = self.config.camera_frame_id
@@ -104,10 +151,9 @@ class CameraWorker:
                     message.data = jpeg.tobytes()
                     with self.lock:
                         self.image, self.received = message, received_mono
-            except Exception:
-                # The camera is optional. The ROS thread reports stale/missing
-                # images, while serial acquisition continues independently.
-                pass
+            except Exception as error:
+                if not self.stop.is_set():
+                    self.logger.warning(f'Optional webcam unavailable: {error}', throttle_duration_sec=5.0)
             finally:
                 with self.lock:
                     self.image = None
@@ -132,7 +178,8 @@ class AirSonarDriver(Node):
         super().__init__('air_sonar')
         defaults = DriverConfig()
         parameters = {field.name: self.declare_parameter(
-            field.name, getattr(defaults, field.name), ParameterDescriptor(read_only=True)).value
+            field.name, getattr(defaults, field.name),
+            ParameterDescriptor(read_only=True, description=PARAMETER_DESCRIPTIONS[field.name])).value
             for field in fields(defaults)}
         self.config = DriverConfig(**parameters)
         waveform = Path(self.config.waveform_file or 'sweeps/sweep_512_taper30.csv').expanduser()
@@ -151,11 +198,17 @@ class AirSonarDriver(Node):
                        'capture_range_m': self.config.capture_events * RANGE_PER_EVENT,
                        'shots': self.config.shots,
                        'waveform_file': str(waveform) if self.waveform else ''}
-        self.camera = (CameraWorker(self.config, self.shutdown_event)
+        self.camera = (CameraWorker(self.config, self.shutdown_event, self.get_logger())
                        if self.config.camera_index >= 0 else None)
         self.create_timer(1.0, self.publish_status)
         self.worker = threading.Thread(target=self.acquire_loop, name='picaso-acquisition', daemon=True)
         self.worker.start()
+        if self.config.max_range > 0:
+            self.get_logger().info(
+                f'max_range {self.config.max_range:.2f} m -> {self.config.capture_events} events '
+                f'(capture depth {self.config.capture_events * RANGE_PER_EVENT:.2f} m)')
+        if self.waveform:
+            self.get_logger().info(f'Active waveform: {waveform}; {len(self.waveform)} DAC samples')
         self.get_logger().info(
             f'PiCASo {self.config.mode}, {self.config.capture_events} events '
             f'(~{self.config.capture_events * RANGE_PER_EVENT:.2f} m capture window), '
@@ -184,6 +237,10 @@ class AirSonarDriver(Node):
         while not self.shutdown_event.is_set() and self.context.ok():
             try:
                 self.sensor.open()
+                self.get_logger().info(
+                    f'Serial port: {self.sensor.connection.port}; '
+                    f'read poll {self.config.serial_timeout:.2f} s, '
+                    f'capture deadline {self.config.capture_timeout:.2f} s')
                 while not self.shutdown_event.is_set() and self.context.ok():
                     began = time.monotonic()
                     image = self.grab_image()
@@ -198,9 +255,17 @@ class AirSonarDriver(Node):
                         message.image_stamp = image.header.stamp
                         self.image_pub.publish(image)
                     self.capture_pub.publish(message)
+                    duration = (data.t_done_mono_ns - data.t_cmd_mono_ns) / 1e9
+                    throughput = message.byte_count / duration / 1e6 if duration > 0 else 0.0
+                    self.get_logger().debug(
+                        f'Capture #{capture_id}: {message.byte_count} bytes, '
+                        f'{duration * 1000:.1f} ms, {throughput:.2f} MB/s'
+                        f'{", paired JPEG" if message.has_image else ""}')
                     with self.lock:
                         self.status.update(state='streaming', captures=capture_id, message='Receiving complete captures',
-                                           last_capture_duration_sec=(data.t_done_mono_ns - data.t_cmd_mono_ns) / 1e9,
+                                           last_capture_duration_sec=duration,
+                                           last_capture_bytes=message.byte_count,
+                                           last_capture_megabytes_per_sec=throughput,
                                            last_capture_id=capture_id, port=self.sensor.connection.port)
                         if self.config.shots and capture_id >= self.config.shots:
                             self.status.update(state='completed', message='Requested capture count reached')
