@@ -77,6 +77,54 @@ for VID/PID discovery, optionally filtered by `serial_number`. An explicit port
 takes priority over discovery. `capture_period: 0.0` acquires back-to-back; positive
 values specify the minimum period including transfer time.
 
+### Export a ROS 2 bag to the original recorder format
+
+With ROS 2 and the built sonar workspace sourced, run the script from this
+repository. It reads the bag directly; no sensor, playback or running ROS nodes
+are needed:
+
+```bash
+python3 picaso_export_bag.py /path/to/sonar_bag \
+    --topic /air_sonar/capture --output /path/to/sonar_export
+```
+
+`bag` must be a ROS 2 bag **directory containing `metadata.yaml`**. `--topic`
+must name a recorded `picaso_msgs/msg/Capture` topic. `--output` is optional;
+it defaults to `<bag_name>_export` beside the bag. The output folder must not
+already exist. The script works across split bag files. SQLite bags work in
+the driver image; other storage formats require their ROS 2 storage plugin.
+For native use, install `ros-${ROS_DISTRO}-rosbag2-py` if it is missing.
+
+To run inside the existing driver image, from the **stack root** (paths in the
+command refer to the container):
+
+```bash
+docker run --rm --network none \
+  -v "$PWD/workspaces/ws_air_sonar:/workspace" \
+  -w /workspace/src/picaso-drone unified_autonomy:ros2_air_sonar \
+  python3 picaso_export_bag.py /workspace/recordings/sonar \
+    --topic /air_sonar/capture --output /workspace/recordings/sonar_export
+```
+
+The folder contains `capture_0001.bin`, `capture_0002.bin`, etc., and
+`timestamps.csv`. Binary files are byte-exact little-endian `uint16` PDM data.
+The CSV's first ten columns match the original recorder: `capture`, `file`,
+`mode`, `events`, `bytes`, `t_cmd_unix`, `t_done_unix`, `t_cmd_mono`,
+`t_done_mono`, `t_cmd_utc`. The four numeric clocks use decimal seconds with
+**nine fractional digits** to preserve the ROS message's nanoseconds without
+float rounding. UTC text is copied unchanged.
+
+Extra columns preserve the original `capture_id`, `header_stamp_ns`, `frame_id`,
+`bag_stamp_ns` (the bag recording timestamp), and `image_stamp_ns` (blank when
+no image was paired). File numbering and the `capture` column are sequential
+in bag order, so IDs resetting after a driver restart cannot overwrite files.
+This exporter does not extract JPEGs or waveform tables. If corrupt data or an
+I/O error interrupts export, the partial output folder is retained for inspection;
+choose a new output folder when retrying.
+
+Test the exporter in the driver image with
+`python3 -m pytest tests/test_export_bag.py -q` from the repository directory.
+
 ### Tests without hardware
 
 After building, run the real serial pseudo-terminal and ROS 2 launch tests in
